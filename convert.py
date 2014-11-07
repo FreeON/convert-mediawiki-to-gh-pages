@@ -14,30 +14,9 @@ class Mysql:
         self.username = username
         self.password = password
 
-        #query = "use %s;\n" % (self.database)
-        #query += "select page.page_title, text.old_text from text "
-        #query += "inner join revision on revision.rev_text_id = text.old_id "
-        #query += "inner join page on page.page_id = revision.rev_page "
-        #query += "where (revision.rev_id = page.page_latest && "
-        #query += "page.page_namespace = 0)\n"
-
         self.mysql_command = [ "mysql", "-u", self.username ]
         if self.password:
             self.mysql_command += [ "--password=%s" % (self.password) ]
-
-    def string_io_wrap (self, string):
-        """Properly treat strings across python2/3 for IO operations
-        (file.write()).
-
-        This function returns a proper string.
-        """
-
-        import sys
-
-        if sys.version_info.major == 3:
-            string = bytes(string, "UTF-8")
-
-        return string
 
     def query (self, query):
         """Query the database.
@@ -53,8 +32,8 @@ class Mysql:
         mysql = subprocess.Popen(self.mysql_command, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        mysql.stdin.write(self.string_io_wrap("use %s;\n" % (self.database)))
-        mysql.stdin.write(self.string_io_wrap(query))
+        mysql.stdin.write(string_io_wrap("use %s;\n" % (self.database)))
+        mysql.stdin.write(string_io_wrap(query))
 
         stdoutdata, stderrdata = mysql.communicate()
 
@@ -71,51 +50,112 @@ class Mysql:
 
         return stdoutdata
 
-    def get_page_ids (self):
-        """Get all page ids from the database.
+    def get_all_revisions (self):
+        """Retrieve all revisions on all pages. Only pages in the main and
+        user namespaces are considered.
 
-        This function returns a tuple of two list of integers, (main_pages,
-        user_pages).
+        This function returns a list of all edits, ordered by timestamp. Each
+        list element contains a dictionary of { timestamp, page_id, page_name,
+        username, user_email, mediawiki_text, markdown_text }.
         """
 
-        main_pages = [ int(i) for i in
-                self.query("select page.page_id from page where page.page_namespace = 0") ]
-        user_pages = [ int(i) for i in
-                self.query("select page.page_id from page where page.page_namespace = 2") ]
-
-        return (main_pages, user_pages)
-
-    def get_page_name (self, page_id):
-        """Get the page name given a page_id."""
-
-        return self.query("select page.page_title from page where page_id = %d" % (page_id))
-
-    def get_page_history (self, page_id):
-        """Retrieve the editing history of a page identified by its page_id.
-
-        This function returns a list of tuples, (timestamp, deleted, text).
-        The deleted flag indicates whether the page was deleted or not.
-        """
-
-        import re
-
-        result = self.query("select revision.rev_timestamp, "
-                + "revision.rev_deleted, text.old_text from revision inner "
-                + "join text on text.old_id = revision.rev_text_id where "
-                + ("rev_page = %d " % (page_id))
+        result = self.query("select concat_ws(',', "
+                + "revision.rev_timestamp, "
+                + "revision.rev_page, "
+                + "revision.rev_deleted, "
+                + "page.page_title, "
+                + "user.user_real_name, "
+                + "user.user_email, "
+                + "text.old_text) "
+                + "from revision "
+                + "inner join text on text.old_id = revision.rev_text_id "
+                + "inner join page on page.page_id = revision.rev_page "
+                + "inner join user on "
+                + "user.user_id = (select if(revision.rev_user = 0, 1, revision.rev_user)) "
                 + "order by revision.rev_timestamp")
 
-        parse = re.compile("^\s*([0-9]+)\s+([0-9]+)\s+(.*)$")
-        history = []
-        for i in result:
-            p = parse.search(i)
-            if p.group(2) == "0":
-                deleted = False
-            else:
-                deleted = True
-            history.append(( p.group(1), deleted, p.group(2) ))
+        print("got %s revisions" % (len(result)))
 
-        return history
+        revisions = []
+        for i in result:
+            temp = i.split(",", 6)
+            temp[6] = temp[6].split("\\n")
+            try:
+                temp.append(mediawiki_to_markdown(temp[6]))
+            except Exception as e:
+                print("can not convert mediawiki text "
+                        + ("for page %s, " % (temp[2]))
+                        + "storing original mediawiki text")
+                temp.append(temp[6])
+            if int(temp[2]) != 0:
+                deleted = True
+            else:
+                deleted = False
+            revisions.append({"timestamp":temp[0], "page_id":int(temp[1]),
+                "deleted":deleted, "page_name":temp[3], "username":temp[4],
+                "user_email":temp[5], "mediawiki_text":temp[6],
+                "markdown_text":temp[7]})
+
+        return revisions
+
+def string_io_wrap (string):
+    """Properly treat strings across python2/3 for IO operations
+    (file.write()).
+
+    This function returns a proper string.
+    """
+
+    import sys
+
+    if sys.version_info.major == 3:
+        string = bytes(string, "UTF-8")
+
+    return string
+
+def mediawiki_to_markdown (page_text):
+    """Convert a text blob from mediawiki format to markdown.
+
+    This function returns the converted text as a list of strings.
+    """
+
+    import subprocess
+    import sys
+
+    pandoc_cmd = [ "pandoc", "--from", "mediawiki", "--to", "markdown_github",
+            "--base-header-level", "2" ]
+
+    pandoc = subprocess.Popen(pandoc_cmd, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=False)
+    for i in page_text:
+        pandoc.stdin.write(string_io_wrap(i + "\n"))
+
+    stdoutdata, stderrdata = pandoc.communicate()
+
+    if sys.version_info.major == 3:
+        stdoutdata = stdoutdata.decode("UTF-8")
+        stderrdata = stderrdata.decode("UTF-8")
+
+    stdoutdata = stdoutdata.splitlines()
+    stderrdata = stderrdata.splitlines()
+
+    if pandoc.returncode != 0:
+        raise Exception("failed to convert mediawiki page")
+
+    return stdoutdata
+
+def convert_wiki_date (wiki_timestamp):
+    """Convert a wiki timestamp to a git datestring.
+
+    The format of timestamps used in MediaWiki URLs and in some of the
+    MediaWiki database fields is yyyymmddhhmmss. For example, the timestamp
+    for August 9th, 2010 00:30:06 UTC is 20100809003006. The timezone for
+    these timestamps is UTC.
+    """
+
+    return (wiki_timestamp[0:4] + "-" + wiki_timestamp[4:6] + "-" +
+            wiki_timestamp[6:8] + "T" + wiki_timestamp[8:10] + ":" +
+            wiki_timestamp[10:12] + ":" + wiki_timestamp[12:14])
 
 def main ():
     """
@@ -128,7 +168,10 @@ def main ():
     import subprocess
     import sys
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="This script converts the "
+            + "pages of a mediawiki database (using mysql) into markdown "
+            + "format, preserving the editing history and attribution. The "
+            + "converted pages are stored in a git repository.")
 
     parser.add_argument("--database",
             help = "The mysql database",
@@ -141,50 +184,54 @@ def main ():
     parser.add_argument("--password",
             help = "The mysql database password")
 
+    parser.add_argument("--output-dir",
+            help = "The path of the resulting converted pages",
+            default = "pages")
+
     options = parser.parse_args()
 
     mysql = Mysql(options.database, options.user, options.password)
 
-    for line in mysql.get_page_ids()[0]:
-        print(line)
-    history = mysql.get_page_history(1)
-    for i in history:
-        print(i[0])
-    sys.exit(0)
+    revisions = mysql.get_all_revisions()
 
-    pandoc_cmd = [ "pandoc", "--from", "mediawiki", "--to", "markdown_github",
-            "--base-header-level", "2" ]
-
-    if os.path.exists("pages"):
+    if os.path.exists(options.output_dir):
         raise Exception("The output path '%s' already exists" % ("pages"))
 
-    os.mkdir("pages")
+    os.mkdir(options.output_dir)
 
-    for line in mysql.stdoutdata.splitlines():
-        page = line.split(None, 1)
-        if len(page) < 2:
-            continue
-        page_title = page[0]
-        page_text = page[1]
-        page_title = re.sub(" ", "_", page_title)
-        page_text = page_text.split("\\n")
-        pandoc = subprocess.Popen( pandoc_cmd, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                universal_newlines=True)
-        for i in page_text:
-            pandoc.stdin.write(i + "\n")
-        stdout_lines, stderr_lines = pandoc.communicate()
+    git = subprocess.Popen(["git", "init"], cwd=options.output_dir)
+    git.wait()
 
-        new_page = open(os.path.join("./pages", page_title + ".md"), "w")
-        new_page.write("---\n")
-        new_page.write("layout: default\n")
-        new_page.write("title: %s\n" % (re.sub("_", " ", page_title)))
-        new_page.write("---\n")
-        new_page.write("\n")
+    for rev in revisions:
+        filename = rev["page_name"] + ".md"
 
-        for i in stdout_lines.splitlines():
-            new_page.write(i + "\n")
-        new_page.close()
+        if rev["deleted"]:
+            git = subprocess.Popen(["git", "rm", filename],
+                    cwd=options.output_dir)
+            git.wait()
+        else:
+            new_page = open(os.path.join("./pages", filename), "w")
+            new_page.write("---\n")
+            new_page.write("layout: default\n")
+            new_page.write("title: %s\n" % (re.sub("_", " ", rev["page_name"])))
+            new_page.write("---\n")
+            new_page.write("\n")
+
+            for i in rev["markdown_text"]:
+                new_page.write(i + "\n")
+            new_page.close()
+
+            git = subprocess.Popen(["git", "add", filename],
+                    cwd=options.output_dir)
+            git.wait()
+
+        datestring = convert_wiki_date(rev["timestamp"])
+
+        git = subprocess.Popen(["git", "commit", "--author", "\"%s <%s>\"" %
+            (rev["username"], rev["user_email"]), "--date", datestring, "-m",
+            "Updating %s" % (rev["page_name"])],
+            cwd=options.output_dir)
+        git.wait()
 
 if __name__ == "__main__":
     main()
