@@ -3,45 +3,84 @@
 class Mysql:
 
     def __init__ (self, database, username, password=None):
-        """
-        Initialize.
-        """
+        """Initialize.
 
-        import subprocess
-        import sys
+        database The database name.
+        username The database username.
+        password The password to use. This argument is optional.
+        """
 
         self.database = database
         self.username = username
         self.password = password
 
-        query = "use %s;\n" % (self.database)
-        query += "select page.page_title, text.old_text from text "
-        query += "inner join revision on revision.rev_text_id = text.old_id "
-        query += "inner join page on page.page_id = revision.rev_page "
-        query += "where (revision.rev_id = page.page_latest && "
-        query += "page.page_namespace = 0)\n"
+        #query = "use %s;\n" % (self.database)
+        #query += "select page.page_title, text.old_text from text "
+        #query += "inner join revision on revision.rev_text_id = text.old_id "
+        #query += "inner join page on page.page_id = revision.rev_page "
+        #query += "where (revision.rev_id = page.page_latest && "
+        #query += "page.page_namespace = 0)\n"
+
+        self.mysql_command = [ "mysql", "-u", self.username ]
+        if self.password:
+            self.mysql_command += [ "--password=%s" % (self.password) ]
+
+    def string_io_wrap (self, string):
+        """Properly treat strings across python2/3 for IO operations
+        (file.write()).
+
+        This function returns a proper string.
+        """
+
+        import sys
 
         if sys.version_info.major == 3:
-            query = bytes(query, "UTF-8")
+            string = bytes(string, "UTF-8")
 
-        mysql_command = [ "mysql", "-u", self.username ]
-        if self.password:
-            mysql_command += [ "--password=%s" % (self.password) ]
+        return string
 
-        mysql = subprocess.Popen(mysql_command, stdin=subprocess.PIPE,
+    def query (self, query):
+        """Query the database.
+
+        query The query command to run.
+
+        The function returns a list of strings with the output of the query.
+        """
+
+        import subprocess
+        import sys
+
+        mysql = subprocess.Popen(self.mysql_command, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-        mysql.stdin.write(query)
+        mysql.stdin.write(self.string_io_wrap("use %s;\n" % (self.database)))
+        mysql.stdin.write(self.string_io_wrap(query))
 
-        self.stdoutdata, self.stderrdata = mysql.communicate()
+        stdoutdata, stderrdata = mysql.communicate()
 
         if sys.version_info.major == 3:
-            self.stdoutdata = self.stdoutdata.decode("UTF-8")
+            stdoutdata = stdoutdata.decode("UTF-8")
+
+        stdoutdata = stdoutdata.splitlines()
 
         if mysql.returncode != 0:
-            for i in self.stdoutdata.splitlines():
+            for i in stdoutdata:
                 print(i.rstrip())
             raise Exception("failed to query database")
+
+        return stdoutdata
+
+    def get_all_pages (self):
+        """Get all page names from the database.
+
+        This function returns a tuple of two list of strings, (main_pages,
+        user_pages).
+        """
+
+        main_pages = self.query("select page.page_title from page where page.page_namespace = 0")
+        user_pages = self.query("select page.page_title from page where page.page_namespace = 2")
+
+        return (main_pages, user_pages)
 
 def main ():
     """
@@ -69,13 +108,17 @@ def main ():
 
     options = parser.parse_args()
 
-    if os.path.exists("pages"):
-        raise Exception("The output path '%s' already exists" % ("pages"))
-
     mysql = Mysql(options.database, options.user, options.password)
+
+    for line in mysql.get_all_pages()[0]:
+        print(line)
+    sys.exit(0)
 
     pandoc_cmd = [ "pandoc", "--from", "mediawiki", "--to", "markdown_github",
             "--base-header-level", "2" ]
+
+    if os.path.exists("pages"):
+        raise Exception("The output path '%s' already exists" % ("pages"))
 
     os.mkdir("pages")
 
