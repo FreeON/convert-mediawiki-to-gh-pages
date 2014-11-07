@@ -51,7 +51,7 @@ class Mysql:
         import sys
 
         mysql = subprocess.Popen(self.mysql_command, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         mysql.stdin.write(self.string_io_wrap("use %s;\n" % (self.database)))
         mysql.stdin.write(self.string_io_wrap(query))
@@ -62,6 +62,7 @@ class Mysql:
             stdoutdata = stdoutdata.decode("UTF-8")
 
         stdoutdata = stdoutdata.splitlines()
+        stdoutdata.pop(0)
 
         if mysql.returncode != 0:
             for i in stdoutdata:
@@ -70,17 +71,51 @@ class Mysql:
 
         return stdoutdata
 
-    def get_all_pages (self):
-        """Get all page names from the database.
+    def get_page_ids (self):
+        """Get all page ids from the database.
 
-        This function returns a tuple of two list of strings, (main_pages,
+        This function returns a tuple of two list of integers, (main_pages,
         user_pages).
         """
 
-        main_pages = self.query("select page.page_title from page where page.page_namespace = 0")
-        user_pages = self.query("select page.page_title from page where page.page_namespace = 2")
+        main_pages = [ int(i) for i in
+                self.query("select page.page_id from page where page.page_namespace = 0") ]
+        user_pages = [ int(i) for i in
+                self.query("select page.page_id from page where page.page_namespace = 2") ]
 
         return (main_pages, user_pages)
+
+    def get_page_name (self, page_id):
+        """Get the page name given a page_id."""
+
+        return self.query("select page.page_title from page where page_id = %d" % (page_id))
+
+    def get_page_history (self, page_id):
+        """Retrieve the editing history of a page identified by its page_id.
+
+        This function returns a list of tuples, (timestamp, deleted, text).
+        The deleted flag indicates whether the page was deleted or not.
+        """
+
+        import re
+
+        result = self.query("select revision.rev_timestamp, "
+                + "revision.rev_deleted, text.old_text from revision inner "
+                + "join text on text.old_id = revision.rev_text_id where "
+                + ("rev_page = %d " % (page_id))
+                + "order by revision.rev_timestamp")
+
+        parse = re.compile("^\s*([0-9]+)\s+([0-9]+)\s+(.*)$")
+        history = []
+        for i in result:
+            p = parse.search(i)
+            if p.group(2) == "0":
+                deleted = False
+            else:
+                deleted = True
+            history.append(( p.group(1), deleted, p.group(2) ))
+
+        return history
 
 def main ():
     """
@@ -110,8 +145,11 @@ def main ():
 
     mysql = Mysql(options.database, options.user, options.password)
 
-    for line in mysql.get_all_pages()[0]:
+    for line in mysql.get_page_ids()[0]:
         print(line)
+    history = mysql.get_page_history(1)
+    for i in history:
+        print(i[0])
     sys.exit(0)
 
     pandoc_cmd = [ "pandoc", "--from", "mediawiki", "--to", "markdown_github",
