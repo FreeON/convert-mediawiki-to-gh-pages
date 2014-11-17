@@ -203,7 +203,7 @@ def main ():
     git.wait()
 
     for rev in revisions:
-        filename = rev["page_name"] + ".md"
+        filename = rev["page_name"] + ".markdown"
 
         if rev["deleted"]:
             git = subprocess.Popen(["git", "rm", filename],
